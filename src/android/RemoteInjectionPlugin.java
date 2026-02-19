@@ -4,7 +4,8 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
 import android.content.res.AssetManager;
-import android.util.Base64;
+import android.webkit.ValueCallback;
+import android.webkit.WebView;
 
 import org.apache.cordova.CordovaPlugin;
 import org.apache.cordova.CordovaWebViewEngine;
@@ -129,23 +130,27 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
         // Initialize the cordova plugin registry.
         jsPaths.add("www/cordova_plugins.js");
 
-        // The way that I figured out to inject for android is to inject it as a script
-        // tag with the full JS encoded as a data URI
-        // (https://developer.mozilla.org/en-US/docs/Web/HTTP/data_URIs).  The script tag
-        // is appended to the DOM and executed via a javascript URL (e.g. javascript:doJsStuff()).
+        // Use evaluateJavascript() to inject directly into the page context.
+        // This bypasses Content Security Policy restrictions that block data: URIs
+        // in script-src directives (e.g. nonce-based CSP used by modern SSR apps).
         StringBuilder jsToInject = new StringBuilder();
         for (String path: jsPaths) {
             jsToInject.append(readFile(cordova.getActivity().getResources().getAssets(), path));
         }
-        String jsUrl = "javascript:var script = document.createElement('script');";
-        jsUrl += "script.src=\"data:text/javascript;charset=utf-8;base64,";
 
-        jsUrl += Base64.encodeToString(jsToInject.toString().getBytes(), Base64.NO_WRAP);
-        jsUrl += "\";";
-
-        jsUrl += "document.getElementsByTagName('head')[0].appendChild(script);";
-
-        webView.getEngine().loadUrl(jsUrl, false);
+        final String js = jsToInject.toString();
+        cordova.getActivity().runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                WebView androidWebView = (WebView) webView.getEngine().getView();
+                androidWebView.evaluateJavascript(js, new ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String result) {
+                        // Injection complete
+                    }
+                });
+            }
+        });
     }
 
     private String readFile(AssetManager assets, String filePath) {
