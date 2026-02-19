@@ -4,12 +4,15 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
 import android.content.res.AssetManager;
+import android.os.AsyncTask;
 import android.webkit.ValueCallback;
 import android.webkit.WebView;
 
+import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaPlugin;
 import org.apache.cordova.CordovaWebViewEngine;
 import org.apache.cordova.LOG;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -18,7 +21,9 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Timer;
@@ -46,6 +51,77 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
         final Activity activity = super.cordova.getActivity();
         final CordovaWebViewEngine engine = super.webView.getEngine();
         lifecycle = new RequestLifecycle(activity, engine, promptInterval);
+    }
+
+    /**
+     * Handle exec() calls from JavaScript.
+     * Supported actions:
+     *   - fetchAndInject: fetches JS from URLs via native HTTP and injects via evaluateJavascript().
+     *     Bypasses CSP restrictions that block dynamically created script tags.
+     *     Args: array of URL strings to fetch and inject sequentially.
+     */
+    @Override
+    public boolean execute(String action, JSONArray args, CallbackContext callbackContext) throws JSONException {
+        if ("fetchAndInject".equals(action)) {
+            final List<String> urls = new ArrayList<String>();
+            for (int i = 0; i < args.length(); i++) {
+                urls.add(args.getString(i));
+            }
+            fetchAndInject(urls, callbackContext);
+            return true;
+        }
+        return false;
+    }
+
+    private void fetchAndInject(final List<String> urls, final CallbackContext callbackContext) {
+        AsyncTask.execute(new Runnable() {
+            @Override
+            public void run() {
+                final StringBuilder allJs = new StringBuilder();
+                for (String urlStr : urls) {
+                    try {
+                        URL url = new URL(urlStr);
+                        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                        conn.setConnectTimeout(5000);
+                        conn.setReadTimeout(10000);
+                        try {
+                            int status = conn.getResponseCode();
+                            if (status != 200) {
+                                callbackContext.error("HTTP " + status + " for " + urlStr);
+                                return;
+                            }
+                            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                            String line;
+                            while ((line = reader.readLine()) != null) {
+                                allJs.append(line);
+                                allJs.append("\n");
+                            }
+                            reader.close();
+                            allJs.append(";\n"); // ensure statement boundary between files
+                        } finally {
+                            conn.disconnect();
+                        }
+                    } catch (IOException e) {
+                        callbackContext.error("Failed to fetch " + urlStr + ": " + e.getMessage());
+                        return;
+                    }
+                }
+
+                final String js = allJs.toString();
+                cordova.getActivity().runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        WebView androidWebView = (WebView) webView.getEngine().getView();
+                        androidWebView.evaluateJavascript(js, new ValueCallback<String>() {
+                            @Override
+                            public void onReceiveValue(String result) {
+                                callbackContext.success();
+                            }
+                        });
+                    }
+                });
+            }
+        });
     }
 
     private void onMessageTypeFailure(String messageId, Object data) {
