@@ -2,6 +2,12 @@
 
 All notable changes to cordova-plugin-remote-injection are documented in this file.
 
+## [0.6.2] - 2026-02-19
+
+### Fixed
+- **Android:** Use explicit UTF-8 charset when reading HTTP responses in `fetchAndInject`, instead of relying on device default charset which can corrupt non-ASCII JavaScript.
+- **Android:** Catch `RuntimeException` (e.g. `SecurityException` from missing INTERNET permission) in `fetchAndInject` and report via `callbackContext.error()` instead of crashing.
+
 ## [0.6.1] - 2026-02-19
 
 ### Security
