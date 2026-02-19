@@ -2,6 +2,18 @@
 
 All notable changes to cordova-plugin-remote-injection are documented in this file.
 
+## [0.6.1] - 2026-02-19
+
+### Security
+- **Android:** `fetchAndInject` is now gated behind a `CRIAllowFetchAndInject` preference (default: `false`). The action is disabled unless explicitly enabled in `config.xml`, preventing misuse if the plugin is included in production builds. Set `<preference name="CRIAllowFetchAndInject" value="true"/>` to enable.
+- **Android:** `fetchAndInject` now validates URL schemes and rejects non-HTTP(S) URLs (e.g. `file://`, `content://`).
+
+### Fixed
+- **Android:** Replaced deprecated `AsyncTask.execute()` with `cordova.getThreadPool().execute()` for background work in `fetchAndInject`.
+- **Android:** Fixed potential resource leak in `fetchAndInject` — response reader now uses try-with-resources.
+- **Android:** Added `instanceof WebView` guard before casting engine view in both `injectCordova()` and `fetchAndInject`. Fails gracefully with an error message if a non-SystemWebView engine is used.
+- **Android:** Added API 19+ runtime check before calling `evaluateJavascript()`. Logs an error on older devices instead of crashing.
+
 ## [0.6.0] - 2026-02-19
 
 ### Changed
