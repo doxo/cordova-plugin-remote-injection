@@ -73,6 +73,22 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
         return false;
     }
 
+    /**
+     * Fetches JavaScript from the given URLs via native HTTP and injects the combined
+     * result into the WebView via evaluateJavascript().
+     *
+     * Both the network fetch (Java HttpURLConnection) and the script execution
+     * (WebView.evaluateJavascript) happen outside the WebView's CSP context, so this
+     * method bypasses Content Security Policy restrictions entirely.
+     *
+     * URLs are fetched sequentially on a background thread. If any fetch fails, the
+     * callback receives an error and no scripts are injected. On success, all fetched
+     * JS is concatenated and injected in a single evaluateJavascript() call on the
+     * UI thread.
+     *
+     * @param urls            List of HTTP/HTTPS URLs pointing to JavaScript sources.
+     * @param callbackContext Cordova callback — success() on injection, error(msg) on failure.
+     */
     private void fetchAndInject(final List<String> urls, final CallbackContext callbackContext) {
         AsyncTask.execute(new Runnable() {
             @Override
