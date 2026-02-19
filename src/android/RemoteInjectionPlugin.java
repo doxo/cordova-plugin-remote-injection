@@ -129,7 +129,7 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
                                 callbackContext.error("HTTP " + status + " for " + urlStr);
                                 return;
                             }
-                            try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()))) {
+                            try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"))) {
                                 String line;
                                 while ((line = reader.readLine()) != null) {
                                     allJs.append(line);
@@ -142,6 +142,9 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
                         }
                     } catch (IOException e) {
                         callbackContext.error("Failed to fetch " + urlStr + ": " + e.getMessage());
+                        return;
+                    } catch (RuntimeException e) {
+                        callbackContext.error("Unexpected error while fetching " + urlStr + ": " + e.getMessage());
                         return;
                     }
                 }
