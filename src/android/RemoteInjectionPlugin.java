@@ -4,11 +4,15 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
 import android.content.res.AssetManager;
-import android.util.Base64;
+import android.os.Build;
+import android.webkit.ValueCallback;
+import android.webkit.WebView;
 
+import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaPlugin;
 import org.apache.cordova.CordovaWebViewEngine;
 import org.apache.cordova.LOG;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -17,7 +21,9 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Timer;
@@ -32,6 +38,7 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
     // List of files to inject before injecting Cordova.
     private final ArrayList<String> preInjectionFileNames = new ArrayList<String>();
     private int promptInterval;  // Delay before prompting user to retry in seconds
+    private boolean allowFetchAndInject;
 
     private RequestLifecycle lifecycle;
 
@@ -41,10 +48,153 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
             preInjectionFileNames.add(path.trim());
         }
         promptInterval = webView.getPreferences().getInteger("CRIPageLoadPromptInterval", 10);
+        allowFetchAndInject = webView.getPreferences().getBoolean("CRIAllowFetchAndInject", false);
 
         final Activity activity = super.cordova.getActivity();
         final CordovaWebViewEngine engine = super.webView.getEngine();
         lifecycle = new RequestLifecycle(activity, engine, promptInterval);
+    }
+
+    /**
+     * Handle exec() calls from JavaScript.
+     * Supported actions:
+     *   - fetchAndInject: fetches JS from URLs via native HTTP and injects via evaluateJavascript().
+     *     Bypasses CSP restrictions that block dynamically created script tags.
+     *     Gated behind the CRIAllowFetchAndInject preference (default: false).
+     *     Args: array of URL strings to fetch and inject sequentially.
+     */
+    @Override
+    public boolean execute(String action, JSONArray args, CallbackContext callbackContext) throws JSONException {
+        if ("fetchAndInject".equals(action)) {
+            if (!allowFetchAndInject) {
+                callbackContext.error("fetchAndInject is disabled. Set CRIAllowFetchAndInject=true in config.xml to enable.");
+                return true;
+            }
+            final List<String> urls = new ArrayList<String>();
+            for (int i = 0; i < args.length(); i++) {
+                urls.add(args.getString(i));
+            }
+            fetchAndInject(urls, callbackContext);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Fetches JavaScript from the given URLs via native HTTP and injects the combined
+     * result into the WebView via evaluateJavascript().
+     *
+     * Both the network fetch (Java HttpURLConnection) and the script execution
+     * (WebView.evaluateJavascript) happen outside the WebView's CSP context, so this
+     * method bypasses Content Security Policy restrictions entirely.
+     *
+     * URLs are fetched sequentially on a background thread. If any fetch fails, the
+     * callback receives an error and no scripts are injected. On success, all fetched
+     * JS is concatenated and injected in a single evaluateJavascript() call on the
+     * UI thread.
+     *
+     * Security: this action is gated behind the CRIAllowFetchAndInject preference
+     * (default: false). Only enable it in debug/dev builds.
+     *
+     * @param urls            List of HTTP/HTTPS URLs pointing to JavaScript sources.
+     * @param callbackContext Cordova callback — success() on injection, error(msg) on failure.
+     */
+    private void fetchAndInject(final List<String> urls, final CallbackContext callbackContext) {
+        cordova.getThreadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                final StringBuilder allJs = new StringBuilder();
+                for (String urlStr : urls) {
+                    URL url;
+                    try {
+                        url = new URL(urlStr);
+                    } catch (MalformedURLException e) {
+                        callbackContext.error("Invalid URL: " + urlStr);
+                        return;
+                    }
+
+                    String scheme = url.getProtocol();
+                    if (!"http".equals(scheme) && !"https".equals(scheme)) {
+                        callbackContext.error("Only http and https URLs are allowed, got: " + scheme + " for " + urlStr);
+                        return;
+                    }
+
+                    try {
+                        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                        conn.setConnectTimeout(5000);
+                        conn.setReadTimeout(10000);
+                        try {
+                            int status = conn.getResponseCode();
+                            if (status != 200) {
+                                callbackContext.error("HTTP " + status + " for " + urlStr);
+                                return;
+                            }
+                            try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"))) {
+                                String line;
+                                while ((line = reader.readLine()) != null) {
+                                    allJs.append(line);
+                                    allJs.append("\n");
+                                }
+                            }
+                            allJs.append(";\n"); // ensure statement boundary between files
+                        } finally {
+                            conn.disconnect();
+                        }
+                    } catch (IOException e) {
+                        callbackContext.error("Failed to fetch " + urlStr + ": " + e.getMessage());
+                        return;
+                    } catch (RuntimeException e) {
+                        callbackContext.error("Unexpected error while fetching " + urlStr + ": " + e.getMessage());
+                        return;
+                    }
+                }
+
+                final String js = allJs.toString();
+                injectJavascript(js, new ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String result) {
+                        callbackContext.success();
+                    }
+                }, new Runnable() {
+                    @Override
+                    public void run() {
+                        callbackContext.error("Current WebView engine does not expose an android.webkit.WebView; cannot inject JavaScript.");
+                    }
+                });
+            }
+        });
+    }
+
+    /**
+     * Injects JavaScript into the WebView via evaluateJavascript() on the UI thread.
+     * Falls back to the onUnsupported callback if the engine view is not a WebView.
+     *
+     * Requires Android API 19+ (KitKat). On older devices, logs an error and runs onUnsupported.
+     *
+     * @param js            The JavaScript code to inject.
+     * @param onComplete    Called on the UI thread after evaluateJavascript() completes.
+     * @param onUnsupported Called on the UI thread if the engine is not a WebView or API < 19.
+     */
+    private void injectJavascript(final String js, final ValueCallback<String> onComplete, final Runnable onUnsupported) {
+        cordova.getActivity().runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.KITKAT) {
+                    LOG.e(TAG, "evaluateJavascript() requires API 19+. Current: " + Build.VERSION.SDK_INT);
+                    if (onUnsupported != null) onUnsupported.run();
+                    return;
+                }
+
+                Object engineView = webView.getEngine().getView();
+                if (engineView instanceof WebView) {
+                    WebView androidWebView = (WebView) engineView;
+                    androidWebView.evaluateJavascript(js, onComplete);
+                } else {
+                    LOG.e(TAG, "Engine view is not a WebView: " + engineView.getClass().getName());
+                    if (onUnsupported != null) onUnsupported.run();
+                }
+            }
+        });
     }
 
     private void onMessageTypeFailure(String messageId, Object data) {
@@ -129,23 +279,26 @@ public class RemoteInjectionPlugin extends CordovaPlugin {
         // Initialize the cordova plugin registry.
         jsPaths.add("www/cordova_plugins.js");
 
-        // The way that I figured out to inject for android is to inject it as a script
-        // tag with the full JS encoded as a data URI
-        // (https://developer.mozilla.org/en-US/docs/Web/HTTP/data_URIs).  The script tag
-        // is appended to the DOM and executed via a javascript URL (e.g. javascript:doJsStuff()).
+        // Use evaluateJavascript() to inject directly into the page context.
+        // This bypasses Content Security Policy restrictions that block data: URIs
+        // in script-src directives (e.g. nonce-based CSP used by modern SSR apps).
         StringBuilder jsToInject = new StringBuilder();
         for (String path: jsPaths) {
             jsToInject.append(readFile(cordova.getActivity().getResources().getAssets(), path));
         }
-        String jsUrl = "javascript:var script = document.createElement('script');";
-        jsUrl += "script.src=\"data:text/javascript;charset=utf-8;base64,";
 
-        jsUrl += Base64.encodeToString(jsToInject.toString().getBytes(), Base64.NO_WRAP);
-        jsUrl += "\";";
-
-        jsUrl += "document.getElementsByTagName('head')[0].appendChild(script);";
-
-        webView.getEngine().loadUrl(jsUrl, false);
+        final String js = jsToInject.toString();
+        injectJavascript(js, new ValueCallback<String>() {
+            @Override
+            public void onReceiveValue(String result) {
+                // Injection complete
+            }
+        }, new Runnable() {
+            @Override
+            public void run() {
+                LOG.e(TAG, "injectCordova failed: engine view is not a WebView.");
+            }
+        });
     }
 
     private String readFile(AssetManager assets, String filePath) {
