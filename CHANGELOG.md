@@ -2,6 +2,11 @@
 
 All notable changes to cordova-plugin-remote-injection are documented in this file.
 
+## [0.7.0] - 2026-03-25
+
+### Fixed
+- **Android:** Exclude `localhost` from `isRemote()` check. `cordova-android` 10+ serves local content via `https://localhost/`, which matched the previous `^http(s)?://.*` regex, causing the plugin to incorrectly inject Cordova and add-on scripts into the local page. This resulted in `cordova already defined` errors and add-ons running where they shouldn't.
+
 ## [0.6.2] - 2026-02-19
 
 ### Fixed
