@@ -32,7 +32,9 @@ import java.util.regex.Pattern;
 
 public class RemoteInjectionPlugin extends CordovaPlugin {
     private static String TAG = "RemoteInjectionPlugin";
-    private static Pattern REMOTE_URL_REGEX = Pattern.compile("^http(s)?://.*");
+    // cordova-android 10+ serves local content via https://localhost/, so the
+    // regex must exclude localhost to avoid injecting into the local Cordova page.
+    private static Pattern REMOTE_URL_REGEX = Pattern.compile("^https?://(?!localhost(?:[/:?#]|$)).*");
 
 
     // List of files to inject before injecting Cordova.
